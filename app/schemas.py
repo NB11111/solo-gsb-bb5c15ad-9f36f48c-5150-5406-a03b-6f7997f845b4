@@ -132,6 +132,9 @@ class Conflict(BaseModel):
     available_barcode: Optional[str] = Field(
         default=None, description="条码换绑冲突:样品当前实际绑定的条码(null=未绑定)"
     )
+    recall_nos: Optional[list[str]] = Field(
+        default=None, description="核销领用冲突:样品当前命中的活跃召回号列表"
+    )
 
 
 class EdgeOut(BaseModel):
@@ -381,6 +384,104 @@ class ConsumptionResult(BaseModel):
         default=False, description="True 表示命中核销号幂等,返回首次结果"
     )
     created_at: Optional[str] = None
+
+
+# ---------------------------------------------------------------- 样品召回
+
+class RecallRequest(BaseModel):
+    """开启样品召回:用召回号、源样品号与原因开启召回。
+
+    - 召回号 recall_no 为幂等键:同号同内容返回首次结果,同号不同内容 409
+    - 源样品必须已存在;召回开启后实时沿谱系边追踪源样品及其全部后代
+      (合并路径只计一次),命中样品在召回关闭前禁止核销领用
+    """
+
+    recall_no: str = Field(min_length=1, description="召回号(幂等键),全局唯一")
+    source_sample_id: str = Field(min_length=1, description="被召回的源样品号")
+    reason: str = Field(min_length=1, description="召回原因(审计必填)")
+    operator: Optional[str] = Field(default=None, description="召回操作人(审计展示)")
+    note: Optional[str] = Field(default=None, description="备注,仅用于审计展示")
+
+
+class RecallCloseRequest(BaseModel):
+    """关闭召回的可选请求体(只需召回号,路径传入;关闭幂等)。"""
+
+    operator: Optional[str] = Field(default=None, description="关闭操作人(审计展示)")
+    note: Optional[str] = Field(
+        default=None, description="关闭备注,仅用于审计展示(仅首次关闭保存)"
+    )
+
+
+class RecallAffectedSampleOut(BaseModel):
+    """召回影响的样品(源样品及其沿谱系边可达的全部后代,合并路径只计一次)。"""
+
+    sample_id: str
+    depth: int = Field(description="相对源样品的跳数:源样品为 0,直接后代为 1")
+
+
+class RecallResult(BaseModel):
+    recall_no: str
+    source_sample_id: str = Field(description="被召回的源样品号")
+    reason: str
+    status: Literal["active", "closed"] = Field(
+        description="active=召回生效中(实时追踪谱系后代);closed=已按召回号关闭"
+    )
+    operator: Optional[str] = None
+    note: Optional[str] = None
+    close_operator: Optional[str] = Field(
+        default=None, description="关闭操作人(closed 后返回)"
+    )
+    close_note: Optional[str] = Field(
+        default=None, description="关闭备注(closed 后返回)"
+    )
+    affected_samples: list[RecallAffectedSampleOut] = Field(
+        description="受影响样品(按跳数、样品号升序):活跃召回实时追踪,"
+                    "源样品及全部后代,合并路径只计一次;已关闭召回为空列表"
+    )
+    affected_count: int = Field(description="受影响样品数(实时追踪结果)")
+    replayed: bool = Field(
+        default=False, description="True 表示命中召回号幂等,返回首次结果"
+    )
+    created_at: Optional[str] = None
+    closed_at: Optional[str] = None
+
+
+class RecallHitOut(BaseModel):
+    """单个样品命中的一个活跃召回及其相对该召回源样品的跳数。"""
+
+    recall_no: str
+    source_sample_id: str
+    reason: str
+    depth: int = Field(description="样品相对召回源样品的跳数,源样品为 0")
+    operator: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class SampleRecallsResponse(BaseModel):
+    sample_id: str
+    recalled: bool = Field(description="该样品当前是否受任意活跃召回影响")
+    recalls: list[RecallHitOut] = Field(
+        description="命中的全部活跃召回(可因合并路径同时受多个召回影响)"
+    )
+
+
+class AffectedSampleOut(BaseModel):
+    """受活跃召回影响的样品及对应召回号。"""
+
+    sample_id: str
+    recall_nos: list[str] = Field(description="影响该样品的全部活跃召回号")
+    recalls: list[RecallHitOut] = Field(description="各召回的源样品、原因与跳数")
+
+
+class AffectedSamplesResponse(BaseModel):
+    samples: list[AffectedSampleOut] = Field(
+        description="受活跃召回影响的样品(按样品号升序),合并路径对同一召回只计一次"
+    )
+
+
+class RecallListResponse(BaseModel):
+    total: int
+    items: list[RecallResult]
 
 
 # ---------------------------------------------------------------- 盘点

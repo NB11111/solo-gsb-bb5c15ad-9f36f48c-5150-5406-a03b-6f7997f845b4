@@ -498,6 +498,30 @@ BEFORE DELETE ON temperature_readings
 BEGIN
     SELECT RAISE(ABORT, 'temperature_readings 不可变:禁止删除测温读数');
 END;
+
+-- 样品召回单:用召回号(recall_no,幂等键)、源样品号与原因开启召回;
+-- active=召回生效中,实时沿谱系边追踪源样品及全部后代(追踪结果不持久化,每次重算);
+-- closed=已按召回号关闭,关闭后核销领用恢复(已建预留同样适用)。
+-- payload 规范化入库用于比对重放。关闭是受控状态迁移(active -> closed,只允许一次),
+-- 故不设禁止 UPDATE/DELETE 的触发器
+CREATE TABLE IF NOT EXISTS recalls (
+    recall_no        TEXT PRIMARY KEY,
+    source_sample_id TEXT NOT NULL,
+    reason           TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'active'
+                     CHECK (status IN ('active', 'closed')),
+    operator         TEXT,
+    note             TEXT,
+    close_operator   TEXT,
+    close_note       TEXT,
+    payload          TEXT NOT NULL,
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    closed_at        TEXT,
+    FOREIGN KEY (source_sample_id) REFERENCES samples(sample_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_recalls_source ON recalls(source_sample_id);
+CREATE INDEX IF NOT EXISTS idx_recalls_status ON recalls(status);
 """
 
 

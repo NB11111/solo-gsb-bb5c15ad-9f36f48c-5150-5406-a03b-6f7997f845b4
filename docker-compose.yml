@@ -1,6 +1,9 @@
 services:
   api:
     build: .
+    # 始终构建本地镜像而非尝试拉取:`docker compose up --build`
+    # 自动完成依赖安装(构建期 pip install)与建表(入口 python -m app.init_db)
+    pull_policy: build
     image: sample-lineage-api:latest
     container_name: sample-lineage-api
     ports:

@@ -8,8 +8,11 @@
     2. 逐项校验样品属于该预留单,且领用量不超过该明细的**未核销量**
        (预留锁定量 − 该明细已核销合计);
     3. 逐项校验样品当前余量足够;
+    4. 逐项校验样品当前不受**活跃召回**影响(实时沿谱系边追踪源样品及
+       全部后代,合并路径只计一次);
   任一项失败即**整单回滚**,余量、版本、核销明细与锁定量一律不变,
-  响应 `conflicts[]` 一次返回全部冲突明细。
+  响应 `conflicts[]` 一次返回全部冲突明细。关闭召回后恢复核销,
+  召回开启前已建立的预留同样适用。
 - 全部校验通过后:扣减各样品余量并递增版本,逐项写入**不可变**核销明细
   (`consumption_items`,触发器禁止 UPDATE/DELETE);该预留明细后续只把
   **未核销部分**继续计入锁定量,释放预留时仅解除剩余(未核销)锁定。
@@ -29,6 +32,7 @@ from typing import Optional
 
 from . import schemas as s
 from . import reservations as rsv
+from . import recalls as rcl
 
 _EPS = 1e-9  # 运算时浮点比较
 
@@ -54,6 +58,7 @@ def _conflict(
     sample_id: Optional[str] = None,
     requested: Optional[float] = None,
     available: Optional[float] = None,
+    recall_nos: Optional[list[str]] = None,
 ) -> s.Conflict:
     return s.Conflict(
         code=code,
@@ -62,6 +67,7 @@ def _conflict(
         sample_id=sample_id,
         requested=requested,
         available=available,
+        recall_nos=recall_nos,
     )
 
 
@@ -213,6 +219,27 @@ def create_consumption(
                     consumption_no=req.consumption_no,
                     sample_id=item.sample_id,
                     requested=amount, available=_r(sample["remaining"]),
+                ))
+
+        # 活跃召回检查:实时沿谱系边追踪各样品是否为某活跃召回的源样品或其后代
+        # (合并路径只计一次)。命中即逐项冲突,与其他冲突一并返回,整单不扣量
+        recall_hits = rcl.hits_for_samples(conn, list(samples.keys()))
+        for item in req.items:
+            hits = recall_hits.get(item.sample_id)
+            if hits:
+                nos = [h.recall_no for h in hits]
+                detail = "、".join(
+                    f"{h.recall_no}(源样品 {h.source_sample_id},原因:{h.reason})"
+                    for h in hits
+                )
+                conflicts.append(_conflict(
+                    "sample_under_recall",
+                    f"样品 {item.sample_id} 受活跃召回影响,禁止核销领用;"
+                    f"命中召回: {detail}。关闭对应召回后恢复核销",
+                    consumption_no=req.consumption_no,
+                    sample_id=item.sample_id,
+                    requested=_r(item.amount),
+                    recall_nos=nos,
                 ))
         if conflicts:
             raise ConsumptionError(conflicts)

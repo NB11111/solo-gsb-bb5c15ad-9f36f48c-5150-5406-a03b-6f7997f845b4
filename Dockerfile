@@ -6,10 +6,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# 依赖安装在镜像构建阶段完成(docker compose up --build 自动执行)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # 非 root 运行,数据库目录显式授权
 RUN useradd --create-home --uid 10001 appuser \
@@ -24,4 +27,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=10s --timeout=3s --retries=5 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=2).status==200 else 1)"
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 容器启动先幂等建表(python -m app.init_db),再起 API;
+# 配合构建期的 pip install,docker compose up --build 即自动完成依赖安装与建表
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

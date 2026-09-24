@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from . import schemas as s
 from . import barcodes as bc
 from . import consumptions as con
+from . import recalls as rc
 from . import reservations as rsv
 from . import reversals as rev
 from . import service
@@ -51,6 +52,11 @@ app = FastAPI(
         "  单事务校验预留未释放、逐项未核销量与样品余量,任一失败整单不变,\n"
         "  成功后扣减余量、递增版本并写不可变核销明细,按核销号幂等重放;\n"
         "  核销后只将未核销部分计入锁定量,释放预留仅解除剩余锁定\n"
+        "- 样品召回:用召回号、源样品号和原因开启召回,可按召回号关闭;\n"
+        "  同号同内容重放、异内容冲突。活跃召回实时沿谱系边追踪源样品及全部后代,\n"
+        "  合并路径只计一次,查询返回受影响样品及对应召回号;\n"
+        "  核销领用在原有单事务内逐项检查活跃召回,命中则逐项冲突、整单不扣量,\n"
+        "  关闭召回后恢复核销,已建预留同样适用\n"
         "- 盘点模块:按样品编号集合建批保存余量/版本快照,\n"
         "  提交实盘时乐观锁校验余量未被改变并计算差异,\n"
         "  确认时单事务二次校验版本、写盘点调整流水并更新余量\n"
@@ -75,7 +81,7 @@ app = FastAPI(
         "  (变更时刻起取新位置、同刻先交接后冲正、同类按明细编号升序),\n"
         "  期间发生位置变更也截断归并,按段返回位置/起止/方向/极值/读数数"
     ),
-    version="1.7.0",
+    version="1.8.0",
     lifespan=lifespan,
 )
 
@@ -156,6 +162,21 @@ async def consumption_error_handler(
     code = exc.conflicts[0].code if exc.conflicts else "consumption_error"
     not_found = {"reservation_not_found", "consumption_not_found"}
     status_code = 404 if code in not_found else 409
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": code if status_code == 404 else "conflict",
+            "conflicts": [c.model_dump() for c in exc.conflicts],
+        },
+    )
+
+
+@app.exception_handler(rc.RecallError)
+async def recall_error_handler(
+    _request, exc: rc.RecallError
+) -> JSONResponse:
+    code = exc.conflicts[0].code if exc.conflicts else "recall_error"
+    status_code = 404 if code == "recall_not_found" else 409
     return JSONResponse(
         status_code=status_code,
         content={
@@ -550,6 +571,93 @@ def get_consumption(
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> s.ConsumptionResult:
     return con.get_consumption(conn, consumption_no)
+
+
+# ---------------------------------------------------------------- 样品召回
+
+@app.post(
+    "/api/v1/recalls",
+    response_model=s.RecallResult,
+    tags=["样品召回"],
+    summary="开启召回:用召回号、源样品号和原因开启召回,"
+            "活跃召回实时追踪源样品及全部后代(合并路径只计一次)",
+)
+def open_recall(
+    body: s.RecallRequest,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> s.RecallResult:
+    return rc.open_recall(conn, body)
+
+
+@app.get(
+    "/api/v1/recalls",
+    response_model=s.RecallListResponse,
+    tags=["样品召回"],
+    summary="召回单列表(可按 status=active/closed 过滤),各单附当前实时受影响样品",
+)
+def list_recalls(
+    status: Optional[str] = Query(default=None, pattern="^(active|closed)$"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> s.RecallListResponse:
+    return rc.list_recalls(conn, status=status, limit=limit, offset=offset)
+
+
+@app.get(
+    "/api/v1/recalls/affected-samples",
+    response_model=s.AffectedSamplesResponse,
+    tags=["样品召回"],
+    summary="查询当前受活跃召回影响的样品及对应召回号"
+            "(实时沿谱系边追踪,合并路径只计一次;可按 sample_id 过滤)",
+)
+def get_affected_samples(
+    sample_id: Optional[list[str]] = Query(
+        default=None, description="可重复传入,如 ?sample_id=S1&sample_id=S2;不传返回全部"
+    ),
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> s.AffectedSamplesResponse:
+    return rc.get_affected_samples(conn, sample_id)
+
+
+@app.get(
+    "/api/v1/recalls/{recall_no}",
+    response_model=s.RecallResult,
+    tags=["样品召回"],
+    summary="按召回号查询召回单及当前实时受影响样品(幂等回放内容)",
+)
+def get_recall(
+    recall_no: str,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> s.RecallResult:
+    return rc.get_recall(conn, recall_no)
+
+
+@app.post(
+    "/api/v1/recalls/{recall_no}/close",
+    response_model=s.RecallResult,
+    tags=["样品召回"],
+    summary="按召回号关闭召回(幂等:重复关闭返回首次关闭结果);关闭后恢复核销领用",
+)
+def close_recall(
+    recall_no: str,
+    body: Optional[s.RecallCloseRequest] = None,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> s.RecallResult:
+    return rc.close_recall(conn, recall_no, body)
+
+
+@app.get(
+    "/api/v1/samples/{sample_id}/recalls",
+    response_model=s.SampleRecallsResponse,
+    tags=["样品召回"],
+    summary="查询单个样品当前命中的全部活跃召回(源样品自身也算受影响)",
+)
+def get_sample_recalls(
+    sample_id: str,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> s.SampleRecallsResponse:
+    return rc.get_sample_recalls(conn, sample_id)
 
 
 # ---------------------------------------------------------------- 盘点
