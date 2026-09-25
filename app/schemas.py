@@ -794,3 +794,72 @@ class LocationExcursionResponse(BaseModel):
         description="带保管位置的越界区间,按起止时间升序;"
         "相邻同向越界读数还须位置期间无变更(同位置)才归并"
     )
+
+
+# ---------------------------------------------------------------- 样品召回
+
+class RecallRequest(BaseModel):
+    """开启召回:以召回号(幂等键)对一个已存在的源样品发起召回。
+
+    召回开启后为 active 状态,实时沿谱系边影响源样品及全部后代
+    (合并汇流路径只计一次),并阻断受影响样品的核销领用;
+    同召回号同内容重放返回首次结果,同号不同内容 409。
+    """
+
+    recall_no: str = Field(min_length=1, description="召回号(幂等键),全局唯一")
+    source_sample_id: str = Field(
+        min_length=1, description="召回源样品号(样品必须已存在)"
+    )
+    reason: str = Field(min_length=1, description="召回原因(审计必填)")
+    operator: Optional[str] = Field(default=None, description="召回发起人(审计展示)")
+    note: Optional[str] = Field(default=None, description="备注,仅用于审计展示")
+
+
+class RecallCloseRequest(BaseModel):
+    """关闭召回:按召回号关闭,重复关闭幂等(返回首次关闭结果)。"""
+
+    operator: Optional[str] = Field(default=None, description="关闭操作人(审计展示)")
+    note: Optional[str] = Field(default=None, description="关闭备注,仅用于审计展示")
+
+
+class RecallResult(BaseModel):
+    recall_no: str
+    source_sample_id: str = Field(description="召回源样品号")
+    reason: str = Field(description="召回原因")
+    status: Literal["active", "closed"] = Field(
+        description="active=召回中(阻断受影响样品核销领用);closed=已关闭(恢复核销)"
+    )
+    affected_samples: list[str] = Field(
+        description="查询时刻实时沿谱系边追踪的受影响样品:源样品及全部后代,"
+        "合并汇流路径只计一次(按样品号排序)"
+    )
+    affected_count: int = Field(description="受影响样品数量(= len(affected_samples))")
+    operator: Optional[str] = None
+    note: Optional[str] = None
+    replayed: bool = Field(
+        default=False,
+        description="True 表示命中召回号幂等(开启重放/重复关闭),返回原结果",
+    )
+    created_at: Optional[str] = None
+    closed_at: Optional[str] = None
+
+
+class RecallListResponse(BaseModel):
+    recalls: list[RecallResult] = Field(
+        description="召回单列表(可按 status 过滤),每项附实时受影响样品"
+    )
+
+
+class SampleRecallItem(BaseModel):
+    recall_no: str
+    source_sample_id: str = Field(description="召回源样品号")
+    reason: str = Field(description="召回原因")
+    created_at: Optional[str] = None
+
+
+class SampleRecallsResponse(BaseModel):
+    sample_id: str
+    recalled: bool = Field(description="该样品当前是否受任一活跃召回影响")
+    recalls: list[SampleRecallItem] = Field(
+        description="当前影响该样品的活跃召回(实时沿谱系边判定),按召回号排序"
+    )

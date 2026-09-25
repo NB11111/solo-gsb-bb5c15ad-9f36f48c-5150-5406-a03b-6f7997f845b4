@@ -8,6 +8,8 @@
     2. 逐项校验样品属于该预留单,且领用量不超过该明细的**未核销量**
        (预留锁定量 − 该明细已核销合计);
     3. 逐项校验样品当前余量足够;
+    4. 逐项校验样品**未受活跃召回影响**(召回实时沿谱系边覆盖源样品
+       及全部后代;对已建预留单同样在核销时刻生效);
   任一项失败即**整单回滚**,余量、版本、核销明细与锁定量一律不变,
   响应 `conflicts[]` 一次返回全部冲突明细。
 - 全部校验通过后:扣减各样品余量并递增版本,逐项写入**不可变**核销明细
@@ -28,6 +30,7 @@ import sqlite3
 from typing import Optional
 
 from . import schemas as s
+from . import recalls as rc
 from . import reservations as rsv
 
 _EPS = 1e-9  # 运算时浮点比较
@@ -156,11 +159,24 @@ def create_consumption(
                 f"SELECT * FROM samples WHERE sample_id IN ({qmarks})", ids
             ).fetchall()
         }
+        # 活跃召回的实时受影响范围(样品号 -> 召回号列表),无活跃召回时为空
+        recall_hits = rc.active_recall_map(conn)
 
-        # 先做全部静态校验(属于预留单 + 未核销量 + 样品余量),收集全部冲突后抛出
+        # 先做全部静态校验(属于预留单 + 未核销量 + 样品余量 + 活跃召回),
+        # 收集全部冲突后抛出
         conflicts: list[s.Conflict] = []
         for item in req.items:
             amount = _r(item.amount)
+            hit_nos = recall_hits.get(item.sample_id)
+            if hit_nos:
+                conflicts.append(_conflict(
+                    "sample_recalled",
+                    f"样品 {item.sample_id} 处于活跃召回 "
+                    f"{', '.join(hit_nos)} 的受影响范围(源样品或其谱系后代),"
+                    "禁止核销领用;关闭召回后恢复",
+                    consumption_no=req.consumption_no,
+                    sample_id=item.sample_id, requested=amount,
+                ))
             ritem = ritems.get(item.sample_id)
             if ritem is None:
                 # 样品可能完全不存在,或存在但不在本预留单中

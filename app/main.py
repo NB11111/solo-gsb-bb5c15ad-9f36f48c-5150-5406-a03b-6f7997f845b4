@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from . import schemas as s
 from . import barcodes as bc
 from . import consumptions as con
+from . import recalls as rc
 from . import reservations as rsv
 from . import reversals as rev
 from . import service
@@ -73,9 +74,14 @@ app = FastAPI(
         "  正常读数或超间隔截断,返回起止时间、越界方向与极值,乱序补录可合并或拆分既有区间;\n"
         "  带保管位置的越界区间另按位置交接/冲正审计的 UTC 落库时间重建读数发生时位置\n"
         "  (变更时刻起取新位置、同刻先交接后冲正、同类按明细编号升序),\n"
-        "  期间发生位置变更也截断归并,按段返回位置/起止/方向/极值/读数数"
+        "  期间发生位置变更也截断归并,按段返回位置/起止/方向/极值/读数数\n"
+        "- 样品召回:以召回号、源样品号和原因开启召回,可按召回号关闭;\n"
+        "  同号同内容重放、异内容冲突;活跃召回实时沿谱系边追踪源样品及全部后代\n"
+        "  (合并汇流路径只计一次),查询返回受影响样品及对应召回号;\n"
+        "  核销领用在原单事务内逐项检查样品是否受活跃召回影响,命中则逐项冲突、\n"
+        "  整单不扣量,关闭召回后恢复核销,已建预留同样适用"
     ),
-    version="1.7.0",
+    version="1.8.0",
     lifespan=lifespan,
 )
 
@@ -186,6 +192,21 @@ async def temperature_error_handler(
 ) -> JSONResponse:
     code = exc.conflicts[0].code if exc.conflicts else "temperature_error"
     status_code = 404 if code in {"temp_profile_not_found"} else 409
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": code if status_code == 404 else "conflict",
+            "conflicts": [c.model_dump() for c in exc.conflicts],
+        },
+    )
+
+
+@app.exception_handler(rc.RecallError)
+async def recall_error_handler(
+    _request, exc: rc.RecallError
+) -> JSONResponse:
+    code = exc.conflicts[0].code if exc.conflicts else "recall_error"
+    status_code = 404 if code in {"recall_not_found"} else 409
     return JSONResponse(
         status_code=status_code,
         content={
@@ -795,3 +816,84 @@ def get_temperature_location_excursions(
             },
         )
     return tp.get_location_excursions(conn, sample_id)
+
+
+# ------------------------------------------------------------ 样品召回
+
+@app.post(
+    "/api/v1/recalls",
+    response_model=s.RecallResult,
+    tags=["样品召回"],
+    summary="开启召回:以召回号、源样品号和原因开启;同号同内容幂等重放,异内容 409",
+)
+def create_recall(
+    body: s.RecallRequest,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> s.RecallResult:
+    return rc.create_recall(conn, body)
+
+
+@app.post(
+    "/api/v1/recalls/{recall_no}/close",
+    response_model=s.RecallResult,
+    tags=["样品召回"],
+    summary="按召回号关闭召回(幂等:重复关闭返回首次关闭结果),关闭后恢复核销领用",
+)
+def close_recall(
+    recall_no: str,
+    body: Optional[s.RecallCloseRequest] = None,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> s.RecallResult:
+    return rc.close_recall(conn, recall_no, body)
+
+
+@app.get(
+    "/api/v1/recalls/{recall_no}",
+    response_model=s.RecallResult,
+    tags=["样品召回"],
+    summary="按召回号查询召回单:实时沿谱系边返回源样品及全部后代(合并路径只计一次)",
+)
+def get_recall(
+    recall_no: str,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> s.RecallResult:
+    return rc.get_recall(conn, recall_no)
+
+
+@app.get(
+    "/api/v1/recalls",
+    response_model=s.RecallListResponse,
+    tags=["样品召回"],
+    summary="召回单列表(可按 status=active/closed 过滤),每项附实时受影响样品",
+)
+def list_recalls(
+    status: Optional[str] = Query(
+        default=None, pattern="^(active|closed)$",
+        description="按召回状态过滤;不传返回全部",
+    ),
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> s.RecallListResponse:
+    return rc.list_recalls(conn, status)
+
+
+@app.get(
+    "/api/v1/samples/{sample_id}/recalls",
+    response_model=s.SampleRecallsResponse,
+    tags=["样品召回"],
+    summary="按样品查询当前影响它的活跃召回(实时沿谱系边判定),返回对应召回号",
+)
+def get_sample_recalls(
+    sample_id: str,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> s.SampleRecallsResponse:
+    if conn.execute(
+        "SELECT 1 FROM samples WHERE sample_id = ?", (sample_id,)
+    ).fetchone() is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": "not_found",
+                "message": f"样品 {sample_id} 不存在",
+            },
+        )
+    return rc.get_sample_recalls(conn, sample_id)

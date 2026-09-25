@@ -1,5 +1,7 @@
 services:
   api:
+    # docker compose up --build:构建镜像时安装依赖,容器启动时自动建表/迁移
+    # (含样品召回 recalls / recall_events 表),API 监听 http://localhost:8000
     build: .
     image: sample-lineage-api:latest
     container_name: sample-lineage-api

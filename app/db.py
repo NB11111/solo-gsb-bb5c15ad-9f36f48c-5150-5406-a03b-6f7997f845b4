@@ -498,6 +498,36 @@ BEFORE DELETE ON temperature_readings
 BEGIN
     SELECT RAISE(ABORT, 'temperature_readings 不可变:禁止删除测温读数');
 END;
+
+-- 样品召回单:一个召回号(recall_no,幂等键)对一个源样品开启召回;
+-- active=召回中(实时沿谱系边影响源样品及全部后代,并阻断核销领用),
+-- closed=已关闭(关闭后恢复核销);payload 规范化入库用于比对重放
+CREATE TABLE IF NOT EXISTS recalls (
+    recall_no        TEXT PRIMARY KEY,
+    source_sample_id TEXT NOT NULL,
+    reason           TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'closed')),
+    payload          TEXT NOT NULL,
+    operator         TEXT,
+    note             TEXT,
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    closed_at        TEXT,
+    FOREIGN KEY (source_sample_id) REFERENCES samples(sample_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_recalls_source ON recalls(source_sample_id);
+
+-- 召回审计事件:开启 / 幂等重放 / 关闭的结果快照均持久化
+CREATE TABLE IF NOT EXISTS recall_events (
+    event_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    recall_no  TEXT,
+    action     TEXT NOT NULL CHECK (action IN ('open', 'replay', 'close')),
+    detail     TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY (recall_no) REFERENCES recalls(recall_no)
+);
+
+CREATE INDEX IF NOT EXISTS idx_revents_recall ON recall_events(recall_no);
 """
 
 
